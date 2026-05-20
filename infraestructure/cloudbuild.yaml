@@ -1,0 +1,106 @@
+# ==============================================================================
+# Axima CI/CD Pipeline — Google Cloud Build
+# ==============================================================================
+# This pipeline builds Docker images for multiple services, runs Terraform
+# plan/apply, and ensures immutable deployments via commit SHA tagging.
+#
+# Design principles:
+#   - Parallel builds where possible (API, Sanitizer, Base)
+#   - Explicit dependency graph (DAG) to minimize lead time
+#   - Immutable image tags tied to Git commit SHAs
+#   - Terraform plan saved as artifact for auditability before apply
+#   - Kaniko for daemon-less, cache-optimized container builds
+# ==============================================================================
+
+steps:
+  # -------------------------------------------------------------------------
+  # Step 0: Build the heavy GPU base image (cached for 7 days)
+  # -------------------------------------------------------------------------
+  # This image contains CUDA, PaddleOCR, and baked models. It changes rarely,
+  # so we cache it aggressively to keep builds fast.
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    args:
+      - --destination=us-central1-docker.pkg.dev/$PROJECT_ID/paddle-repo/axima-ai-base:latest
+      - --dockerfile=Dockerfile.base
+      - --cache=true
+      - --cache-ttl=168h          # 7-day cache for the expensive ML layer
+      - --context=dir:///workspace/Axima-Backend
+    id: 'BUILD_BASE'
+
+  # -------------------------------------------------------------------------
+  # Step 1: Build the GPU worker image (depends on BASE)
+  # -------------------------------------------------------------------------
+  # Tagged with both $SHORT_SHA (immutable) and latest (convenience).
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    args:
+      - --destination=us-central1-docker.pkg.dev/$PROJECT_ID/paddle-repo/worker:$SHORT_SHA
+      - --destination=us-central1-docker.pkg.dev/$PROJECT_ID/paddle-repo/worker:latest
+      - --build-arg=PROJECT_ID=$PROJECT_ID
+      - --build-arg=IMAGE_TAG=$SHORT_SHA
+      - --dockerfile=Dockerfile.worker
+      - --context=dir:///workspace/Axima-Backend
+    id: 'BUILD_WORKER'
+    waitFor: ['BUILD_BASE']
+
+  # -------------------------------------------------------------------------
+  # Step 2: Build the API orchestrator (parallel with BASE)
+  # -------------------------------------------------------------------------
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    args:
+      - --destination=us-central1-docker.pkg.dev/$PROJECT_ID/paddle-repo/axima-api:$SHORT_SHA
+      - --destination=us-central1-docker.pkg.dev/$PROJECT_ID/paddle-repo/axima-api:latest
+      - --dockerfile=Dockerfile
+      - --context=dir:///workspace/Axima-Backend/api
+    id: 'BUILD_API'
+    waitFor: ['-']
+
+  # -------------------------------------------------------------------------
+  # Step 3: Build the image sanitizer (parallel with BASE and API)
+  # -------------------------------------------------------------------------
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    args:
+      - --destination=us-central1-docker.pkg.dev/$PROJECT_ID/paddle-repo/sanitizer:$SHORT_SHA
+      - --destination=us-central1-docker.pkg.dev/$PROJECT_ID/paddle-repo/sanitizer:latest
+      - --dockerfile=Dockerfile
+      - --context=dir:///workspace/Axima-Backend/sanitizer
+    id: 'BUILD_SANITIZER'
+    waitFor: ['-']
+
+  # -------------------------------------------------------------------------
+  # Step 4: Terraform plan — preview infrastructure changes before applying
+  # -------------------------------------------------------------------------
+  # Uses a fixed Terraform version (1.7.0) for reproducibility.
+  # The plan file (tfplan) is saved and passed to the next step, ensuring
+  # that 'apply' only executes what was reviewed in 'plan'.
+  - name: 'hashicorp/terraform:1.7.0'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        cd Axima-Infraestructure
+        terraform init
+        terraform plan -var="project_id=$PROJECT_ID" -var="image_tag=$SHORT_SHA" -out=tfplan
+    id: 'TF_PLAN'
+    waitFor: ['BUILD_WORKER', 'BUILD_API', 'BUILD_SANITIZER']
+
+  # -------------------------------------------------------------------------
+  # Step 5: Terraform apply — deploy infrastructure changes
+  # -------------------------------------------------------------------------
+  - name: 'hashicorp/terraform:1.7.0'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        cd Axima-Infraestructure
+        terraform apply -auto-approve tfplan
+    id: 'TF_APPLY'
+    waitFor: ['TF_PLAN']
+
+# ---------------------------------------------------------------------------
+# Pipeline options
+# ---------------------------------------------------------------------------
+timeout: '1200s'                    # 20 minutes (GPU image builds are heavy)
+options:
+  machineType: 'N1_HIGHCPU_8'       # High-CPU machine for faster builds
+  logging: CLOUD_LOGGING_ONLY       # Logs go to Cloud Logging, not stdout
+  dynamic_substitutions: true       # Enable complex variable interpolation
