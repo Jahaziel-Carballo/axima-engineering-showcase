@@ -120,7 +120,7 @@ Selected Python snippets that illustrate coding standards and architectural patt
 **Jahaziel Carballo García**  
 📍 Monterrey, NL, Mexico  
 📧 jahazielg418@gmail.com  
-🔗 [LinkedIn] | [GitHub]
+🔗 [https://www.linkedin.com/in/jahaziel-carballo-640975352/]
 
 > This showcase demonstrates engineering depth without exposing proprietary logic. For a live walkthrough of the full system, I am happy to present it.
 > For a detailed document processing flow, see architecture/document-flow.png.
