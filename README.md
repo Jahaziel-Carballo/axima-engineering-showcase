@@ -48,7 +48,6 @@ Project‑level log exclusion filters suppress health‑check noise and debug ve
 at ingestion time, cutting logging costs before they accumulate. Autoscaling
 decisions are driven by real user‑facing signals, not just CPU. GPU compute
 schedules align with business hours, and Saturday shutdowns eliminate weekend waste.
----
 
 ## System Architecture
 
